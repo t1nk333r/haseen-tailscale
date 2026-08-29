@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "id": "t1nk33r.tailscale",
+  "name": "My Tailscale",
+  "version": "1.0.0",
+  "author": "t1nk33r",
+  "license": "MIT",
+  "description": "Tailscale status, connection switching, machine browsing, and quick copy actions in the Omarchy bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "My Tailscale",
+    "description": "Toggle Tailscale, switch connections, browse machines, and copy machine IPs or names.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 30
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 30
+      }
+    ]
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.tailscale"
+  }
+}
