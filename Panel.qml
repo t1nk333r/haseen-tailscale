@@ -5,6 +5,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "Model.js" as Model
 
 Panel {
   id: root
@@ -12,6 +13,9 @@ Panel {
   ipcTarget: "omarchy.tailscale"
   manageIpc: false
 
+  // "main" (hero → connections → exit nodes → machines) or "settings" (the
+  // cog's page: the `tailscale set` switches and the login-server row).
+  property string page: "main"
   property string focusSection: "header"
   property int headerIndex: 0
   property int accountIndex: 0
@@ -23,6 +27,12 @@ Panel {
   // one activation arms the row, a second fires it, Esc disarms.
   property bool rebindArmed: false
   property bool cursorActive: false
+  // The pointer's row, painted like the cursor but never what Enter acts on:
+  // the keyboard cursor above moves with j/k, a click, or hover only when the
+  // hoverSelects setting says so (Model.pointerSelects).
+  property string hoverSection: ""
+  property int hoverIndex: -1
+  readonly property bool hoverSelects: setting("hoverSelects", false) === true
   property bool copyMenuOpen: false
   property bool mullvadPickerOpen: false
   property string mullvadQuery: ""
@@ -47,9 +57,13 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool showLoginServer: tailscale.installed && (tailscale.loginServerDiffers || !tailscale.loginServerCheck.ok)
-  readonly property bool showConnections: tailscale.accounts.length > 1 || tailscale.accountsAccessDenied || showLoginServer
+  readonly property bool showConnections: tailscale.accounts.length > 1 || tailscale.accountsAccessDenied
   readonly property bool showPeers: tailscale.active && tailscale.peers.length > 0
   readonly property bool showSettings: tailscale.installed && tailscale.active && tailscale.prefsLoaded
+  readonly property bool hasSettingsPage: showSettings || showLoginServer
+  readonly property bool mainPage: page === "main"
+  readonly property bool settingsPage: page === "settings"
+  readonly property string controlServerText: tailscale.controlUrl === "" ? "Not bound to a control server" : "Control server · " + tailscale.controlUrl
   readonly property var recentMullvadRegions: settings.recentMullvadRegions instanceof Array ? settings.recentMullvadRegions : (settings.recentMullvadCountries instanceof Array ? settings.recentMullvadCountries : [])
   readonly property var recentMullvadExitNodes: recentMullvadNodes()
   readonly property var exitNodes: displayExitNodes()
@@ -78,9 +92,15 @@ Panel {
       ? "Logs out of " + tailscale.controlUrl + " and removes that profile · Esc cancels"
       : "Logs out of " + tailscale.controlUrl + " first; confirmed before anything runs")
   readonly property var filteredMullvadRegions: filteredMullvadRegionNodes()
-  // Only claim the header cursor when the switch is actually on screen —
-  // "header" stays navigable, but an absent CLI leaves nothing to highlight.
-  readonly property bool headerHasCursor: cursorActive && focusSection === "header" && tailscale.installed
+  // The header holds one cursor target per control, walked with h/l: on main
+  // the cog (when there is a settings page) and the switch (when the CLI is
+  // present); on settings only the back button.
+  readonly property int cogHeaderIndex: page === "main" && hasSettingsPage ? 0 : -1
+  readonly property int toggleHeaderIndex: page === "main" && tailscale.installed ? (hasSettingsPage ? 1 : 0) : -1
+  readonly property int headerActionCount: page === "settings" ? 1 : (hasSettingsPage ? 1 : 0) + (tailscale.installed ? 1 : 0)
+  readonly property bool cogHasCursor: cogHeaderIndex !== -1 && rowHasCursor("header", cogHeaderIndex)
+  readonly property bool toggleHasCursor: toggleHeaderIndex !== -1 && rowHasCursor("header", toggleHeaderIndex)
+  readonly property bool backHasCursor: page === "settings" && rowHasCursor("header", 0)
   readonly property color iconColor: tailscale.active ? foreground : dim
   readonly property string toggleHint: tailscale.active ? "Turn Tailscale off" : (tailscale.needsLogin ? "Authorize this device" : "Turn Tailscale on")
   readonly property color barIconColor: tailscale.active ? barForeground : Qt.darker(barForeground, 1.55)
@@ -207,21 +227,23 @@ Panel {
     return tailscale.accounts[Math.max(0, Math.min(accountIndex, tailscale.accounts.length - 1))]
   }
 
-  // The keyboard cursor walks these sections top to bottom; each one is a
-  // list with its own index. Adding a section means adding it here and to
-  // sectionCount/sectionIndex, not to a chain of fallbacks.
+  // The keyboard cursor walks the current page's sections top to bottom
+  // (Model.PAGE_SECTIONS); each one is a list with its own index. Adding a
+  // section means adding it there and to sectionCount/sectionIndex, not to a
+  // chain of fallbacks.
   function sectionList() {
-    var list = ["header"]
-    if (tailscale.accountsAccessDenied) list.push("auth")
-    if (showLoginServer) list.push("loginServer")
-    if (tailscale.accounts.length > 1) list.push("accounts")
-    if (showExitNodes) list.push("exitNodes")
-    if (showSettings) list.push("settings")
-    if (showPeers) list.push("peers")
-    return list
+    return Model.pageSections(page, {
+      auth: tailscale.accountsAccessDenied,
+      loginServer: showLoginServer,
+      accounts: tailscale.accounts.length > 1,
+      exitNodes: showExitNodes,
+      settings: showSettings,
+      peers: showPeers
+    })
   }
 
   function sectionCount(name) {
+    if (name === "header") return headerActionCount
     if (name === "accounts") return tailscale.accounts.length
     if (name === "exitNodes") return exitNodes.length
     if (name === "settings") return preferenceRows.length
@@ -230,6 +252,7 @@ Panel {
   }
 
   function sectionIndex(name) {
+    if (name === "header") return headerIndex
     if (name === "accounts") return accountIndex
     if (name === "exitNodes") return exitNodeIndex
     if (name === "settings") return settingIndex
@@ -239,14 +262,52 @@ Panel {
 
   function setSectionIndex(name, index) {
     var value = Math.max(0, Math.min(index, sectionCount(name) - 1))
-    if (name === "accounts") accountIndex = value
+    if (name === "header") headerIndex = value
+    else if (name === "accounts") accountIndex = value
     else if (name === "exitNodes") exitNodeIndex = value
     else if (name === "settings") settingIndex = value
     else if (name === "peers") peerIndex = value
   }
 
+  // Does this row paint the cursor ring? True for the pointer's row and for
+  // the keyboard cursor's row while the cursor is active.
+  function rowHasCursor(section, index) {
+    return Model.rowHasCursor(section, index,
+      { section: hoverSection, index: hoverIndex },
+      { active: cursorActive, section: focusSection, index: sectionIndex(section) })
+  }
+
+  // Pointer entered a row: paint it, and move the keyboard cursor only when
+  // the hoverSelects setting asks for the old behaviour.
+  function hover(section, index) {
+    hoverSection = section
+    hoverIndex = index
+    if (Model.pointerSelects("hover", hoverSelects)) selectCursor(section, index)
+  }
+
+  function unhover(section, index) {
+    if (hoverSection === section && hoverIndex === index) { hoverSection = ""; hoverIndex = -1 }
+  }
+
+  // The Mullvad picker's Enter acts on mullvadRegionIndex, which the search
+  // field's j/k drive; hover paints the row and moves that index only when
+  // hoverSelects opts in.
+  function hoverMullvadRegion(index) {
+    hoverSection = "mullvad"
+    hoverIndex = index
+    if (Model.pointerSelects("hover", hoverSelects)) mullvadRegionIndex = index
+  }
+
+  // A click (or a hover-select) puts the keyboard cursor on the row, so j/k
+  // continue from what was just clicked.
+  function selectCursor(section, index) {
+    cursorActive = true
+    focusSection = section
+    setSectionIndex(section, index)
+  }
+
   function ensureCursor() {
-    headerIndex = 0
+    setSectionIndex("header", headerIndex)
     setSectionIndex("accounts", accountIndex)
     setSectionIndex("peers", peerIndex)
     setSectionIndex("exitNodes", exitNodeIndex)
@@ -256,26 +317,52 @@ Panel {
     if (list.indexOf(focusSection) !== -1) return
     // The section under the cursor went away: land on the nearest one that
     // is still visible, preferring the one below it.
-    var order = ["header", "auth", "loginServer", "accounts", "exitNodes", "settings", "peers"]
+    var order = Model.pageOrder(page)
     var from = order.indexOf(focusSection)
     for (var below = from + 1; below < order.length; below++) if (list.indexOf(order[below]) !== -1) { focusSection = order[below]; return }
     for (var above = from - 1; above >= 0; above--) if (list.indexOf(order[above]) !== -1) { focusSection = order[above]; return }
     focusSection = "header"
   }
 
+  // Leaving a page forgets its transient state: the cursor lands on the new
+  // page's header, the switches start at the first row, an armed rebind and
+  // an open Mullvad picker are dropped, and the view scrolls back to the top.
+  function showPage(next) {
+    var entered = Model.enterPage(next)
+    if (entered.page === page) return
+    page = entered.page
+    focusSection = entered.focusSection
+    headerIndex = entered.headerIndex
+    settingIndex = entered.settingIndex
+    rebindArmed = entered.rebindArmed
+    mullvadPickerOpen = false
+    hoverSection = ""
+    hoverIndex = -1
+    if (panelFlick) panelFlick.contentY = 0
+    ensureCursor()
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  function openSettings() { showPage("settings") }
+  function closeSettings() { showPage("main") }
+
   function moveCursor(dx, dy) {
     cursorActive = true
     ensureCursor()
+    // h/l walk the header's controls; j/k treat the header as one row.
+    if (dx !== 0 && focusSection === "header") setSectionIndex("header", headerIndex + dx)
     if (dy !== 0) {
       var list = sectionList()
       var pos = list.indexOf(focusSection)
-      var index = sectionIndex(focusSection)
+      var oneRow = focusSection === "header"
+      var index = oneRow ? 0 : sectionIndex(focusSection)
+      var count = oneRow ? 1 : sectionCount(focusSection)
       if (dy > 0) {
-        if (index < sectionCount(focusSection) - 1) setSectionIndex(focusSection, index + 1)
+        if (index < count - 1) setSectionIndex(focusSection, index + 1)
         else if (pos < list.length - 1) { focusSection = list[pos + 1]; setSectionIndex(focusSection, 0) }
       } else {
         if (index > 0) setSectionIndex(focusSection, index - 1)
-        else if (pos > 0) { focusSection = list[pos - 1]; setSectionIndex(focusSection, sectionCount(focusSection) - 1) }
+        else if (pos > 0) { focusSection = list[pos - 1]; if (focusSection !== "header") setSectionIndex(focusSection, sectionCount(focusSection) - 1) }
       }
     }
     if (focusSection !== "loginServer") rebindArmed = false
@@ -283,10 +370,16 @@ Panel {
     scrollCursorIntoView()
   }
 
+  function activateHeader() {
+    if (page === "settings") closeSettings()
+    else if (headerIndex === cogHeaderIndex) openSettings()
+    else if (headerIndex === toggleHeaderIndex) tailscale.toggleTailscale()
+  }
+
   function activateCursor() {
     ensureCursor()
     if (focusSection === "header") {
-      tailscale.toggleTailscale()
+      activateHeader()
     } else if (focusSection === "auth") {
       tailscale.authorizeTailscaleOperator()
     } else if (focusSection === "loginServer") {
@@ -352,17 +445,11 @@ Panel {
     if (focusSection === "peers" && peerColumn && peerIndex >= 0 && peerIndex < peerColumn.children.length) scrollItemIntoView(peerColumn.children[peerIndex])
     else if (focusSection === "exitNodes" && exitNodeColumn && exitNodeIndex >= 0 && exitNodeIndex < exitNodeColumn.children.length) scrollItemIntoView(exitNodeColumn.children[exitNodeIndex])
     else if (focusSection === "settings" && settingsColumn && settingIndex >= 0 && settingIndex < settingsColumn.children.length) scrollItemIntoView(settingsColumn.children[settingIndex])
+    else if (focusSection === "loginServer" && loginServerItem) scrollItemIntoView(loginServerItem)
   }
 
   function scrollMullvadRegionCursorIntoView() {
     if (mullvadRegionColumn && mullvadRegionIndex >= 0 && mullvadRegionIndex < mullvadRegionColumn.children.length) scrollItemIntoView(mullvadRegionColumn.children[mullvadRegionIndex])
-  }
-
-  function setPeerCursor(index) {
-    cursorActive = true
-    focusSection = "peers"
-    peerIndex = index
-    scrollCursorIntoView()
   }
 
   // The file picker takes over from here, so get the panel out of the way.
@@ -378,54 +465,33 @@ Panel {
     if (item && item.openCopyMenu) item.openCopyMenu()
   }
 
-  function setExitNodeCursor(index) {
-    cursorActive = true
-    focusSection = "exitNodes"
-    exitNodeIndex = index
-    scrollCursorIntoView()
-  }
-
-  function setSettingCursor(index) {
-    cursorActive = true
-    focusSection = "settings"
-    settingIndex = index
-    scrollCursorIntoView()
-  }
-
-  function setLoginServerCursor() {
-    cursorActive = true
-    focusSection = "loginServer"
-  }
-
-  function setAccountCursor(index) {
-    cursorActive = true
-    focusSection = "accounts"
-    accountIndex = index
-  }
-
-  function setAuthCursor() {
-    cursorActive = true
-    focusSection = "auth"
-  }
-
-  function setHeaderCursor() {
-    cursorActive = true
-    focusSection = "header"
-    headerIndex = 0
-  }
-
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  // Every open starts on the main page with the keyboard cursor parked on the
+  // header (Model.enterPage): Settings is a detour, not a place the panel
+  // remembers, and the first j/Enter always start from a known row.
   onOpenedChanged: if (opened) {
+    var entered = Model.enterPage("main")
+    page = entered.page
+    focusSection = entered.focusSection
+    headerIndex = entered.headerIndex
+    settingIndex = entered.settingIndex
+    rebindArmed = entered.rebindArmed
+    hoverSection = ""
+    hoverIndex = -1
     cursorActive = false
-    rebindArmed = false
+    mullvadPickerOpen = false
     if (panelFlick) panelFlick.contentY = 0
+    ensureCursor()
     tailscale.refresh()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   } else {
     rebindArmed = false
   }
+  onPageChanged: ensureCursor()
+  onHasSettingsPageChanged: if (!hasSettingsPage) closeSettings()
+  onHeaderActionCountChanged: ensureCursor()
   onPeerIndexChanged: scrollCursorIntoView()
   onExitNodeIndexChanged: scrollCursorIntoView()
   onSettingIndexChanged: scrollCursorIntoView()
@@ -456,6 +522,9 @@ Panel {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
+    // Opens straight onto the settings page - for keybinds and for driving
+    // the panel without a pointer, which is how it gets screenshotted.
+    function settings(): void { root.open(); root.openSettings() }
     function refresh(): string { tailscale.refresh(); return "ok" }
     function up(): string { tailscale.loginOrUp(); return "ok" }
     function down(): string { tailscale.down(); return "ok" }
@@ -505,8 +574,11 @@ Panel {
         root.moveCursor(dx, dy)
       }
       onActivateRequested: if (root.cursorActive) root.activateCursor()
+      // Esc: disarm a pending rebind, else leave Settings, else close.
       onCloseRequested: {
-        if (root.rebindArmed) root.rebindArmed = false
+        var action = Model.escapeAction(root.page, root.rebindArmed)
+        if (action === "disarm") root.rebindArmed = false
+        else if (action === "back") root.closeSettings()
         else root.close()
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
@@ -536,14 +608,21 @@ Panel {
           width: panelFlick.width
           spacing: Style.space(12)
 
+          // ---- Main page: hero (icon · name + status · cog + switch) ----
           Item {
             id: header
+            visible: root.mainPage
             width: parent.width
             implicitHeight: hero.implicitHeight + (controlServerLine.visible ? controlServerLine.implicitHeight + Style.space(4) : 0)
             // Exposed for the hero's trailingControl, whose `root` resolves to
             // PanelHero (not this Panel) — reach panel state via `header`.
-            readonly property bool ringVisible: root.headerHasCursor
-            function focusHero() { root.setHeaderCursor() }
+            readonly property bool cogVisible: root.hasSettingsPage
+            readonly property bool cogRing: root.cogHasCursor
+            readonly property bool toggleRing: root.toggleHasCursor
+            function hoverCog(on) { if (on) root.hover("header", root.cogHeaderIndex); else root.unhover("header", root.cogHeaderIndex) }
+            function hoverToggle(on) { if (on) root.hover("header", root.toggleHeaderIndex); else root.unhover("header", root.toggleHeaderIndex) }
+            function clickCog() { root.selectCursor("header", root.cogHeaderIndex); root.openSettings() }
+            function clickToggle() { root.selectCursor("header", root.toggleHeaderIndex); tailscale.toggleTailscale() }
 
             PanelHero {
               id: hero
@@ -564,24 +643,46 @@ Panel {
                 }
               }
 
-              // Compact on/off switch on the trailing edge of the hero, and the
-              // header's only cursor target. The service already flips `active`
-              // optimistically, so the knob throws the instant you click it.
+              // The header's cursor targets, on the trailing edge of the hero:
+              // the cog opens the Settings page; the compact on/off switch
+              // toggles. The service already flips `active` optimistically, so
+              // the knob throws the instant you click it.
               trailingControl: Component {
-                ToggleSwitch {
-                  id: powerSwitch
-                  visible: tailscale.installed
-                  checked: tailscale.active
-                  busy: tailscale.busy
-                  hasCursor: header.ringVisible
-                  foreground: hero.foreground
-                  onHovered: function(on) { if (on) header.focusHero() }
-                  onToggled: tailscale.toggleTailscale()
+                RowLayout {
+                  spacing: Style.space(8)
 
-                  PanelToolTip {
-                    visible: powerSwitch.containsMouse
-                    text: root.toggleHint
+                  Button {
+                    id: settingsButton
+                    visible: header.cogVisible
+                    iconText: "󰒓"
+                    tooltipText: "Settings"
+                    foreground: hero.foreground
                     fontFamily: hero.fontFamily
+                    iconSize: Style.font.subtitle * 1.5
+                    horizontalPadding: Style.space(5)
+                    verticalPadding: Style.space(2)
+                    hasCursor: header.cogRing
+                    Layout.alignment: Qt.AlignVCenter
+                    onHovered: function(on) { header.hoverCog(on) }
+                    onClicked: header.clickCog()
+                  }
+
+                  ToggleSwitch {
+                    id: powerSwitch
+                    visible: tailscale.installed
+                    checked: tailscale.active
+                    busy: tailscale.busy
+                    hasCursor: header.toggleRing
+                    foreground: hero.foreground
+                    Layout.alignment: Qt.AlignVCenter
+                    onHovered: function(on) { header.hoverToggle(on) }
+                    onToggled: header.clickToggle()
+
+                    PanelToolTip {
+                      visible: powerSwitch.containsMouse
+                      text: root.toggleHint
+                      fontFamily: hero.fontFamily
+                    }
                   }
                 }
               }
@@ -597,11 +698,66 @@ Panel {
               anchors.left: parent.left
               anchors.right: parent.right
               textFormat: Text.PlainText
-              text: tailscale.controlUrl === "" ? "Not bound to a control server" : "Control server · " + tailscale.controlUrl
+              text: root.controlServerText
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               elide: Text.ElideMiddle
+            }
+          }
+
+          // ---- Settings page: back · title · control server ----
+          Item {
+            id: settingsHeader
+            visible: root.settingsPage
+            width: parent.width
+            implicitHeight: Math.max(backButton.implicitHeight, settingsLabels.implicitHeight)
+
+            Button {
+              id: backButton
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "󰅁"
+              tooltipText: "Back"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              iconSize: Style.font.subtitle * 1.5
+              horizontalPadding: Style.space(5)
+              verticalPadding: Style.space(2)
+              hasCursor: root.backHasCursor
+              onHovered: function(on) { if (on) root.hover("header", 0); else root.unhover("header", 0) }
+              onClicked: root.closeSettings()
+            }
+
+            Column {
+              id: settingsLabels
+              anchors.left: backButton.right
+              anchors.leftMargin: Style.space(10)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(2)
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "Settings"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                visible: tailscale.installed && tailscale.prefsLoaded
+                textFormat: Text.PlainText
+                text: root.controlServerText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideMiddle
+              }
             }
           }
 
@@ -647,13 +803,15 @@ Panel {
             }
           }
 
+          // Main page sections, top to bottom: connections → exit nodes →
+          // machines. Settings-page sections follow the machines block.
           PanelSeparator {
-            visible: root.showConnections
+            visible: root.mainPage && root.showConnections
             foreground: root.foreground
           }
 
           Column {
-            visible: root.showConnections
+            visible: root.mainPage && root.showConnections
             width: parent.width
             spacing: Style.space(10)
 
@@ -665,11 +823,6 @@ Panel {
 
             AuthRow {
               visible: tailscale.accountsAccessDenied
-              width: parent.width
-            }
-
-            LoginServerRow {
-              visible: root.showLoginServer
               width: parent.width
             }
 
@@ -686,12 +839,12 @@ Panel {
           }
 
           PanelSeparator {
-            visible: root.showExitNodes
+            visible: root.mainPage && root.showExitNodes
             foreground: root.foreground
           }
 
           Column {
-            visible: root.showExitNodes
+            visible: root.mainPage && root.showExitNodes
             width: parent.width
             spacing: Style.space(10)
 
@@ -800,48 +953,12 @@ Panel {
           }
 
           PanelSeparator {
-            visible: root.showSettings
-            foreground: root.foreground
-          }
-
-          // Ported from hehh2001/omarchy-tailscale-plus @426b3cc (MIT): the
-          // `tailscale set` switches, read back from `tailscale debug prefs`.
-          Column {
-            visible: root.showSettings
-            width: parent.width
-            spacing: Style.space(10)
-
-            PanelSectionHeader {
-              text: "SETTINGS"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Column {
-              id: settingsColumn
-              width: parent.width
-              spacing: Style.space(6)
-
-              Repeater {
-                model: root.preferenceRows
-                SettingRow {
-                  required property var modelData
-                  required property int index
-                  width: settingsColumn.width
-                  preference: modelData
-                  rowIndex: index
-                }
-              }
-            }
-          }
-
-          PanelSeparator {
-            visible: tailscale.installed && tailscale.active
+            visible: root.mainPage && tailscale.installed && tailscale.active
             foreground: root.foreground
           }
 
           Column {
-            visible: tailscale.installed && tailscale.active
+            visible: root.mainPage && tailscale.installed && tailscale.active
             width: parent.width
             spacing: Style.space(10)
 
@@ -877,6 +994,65 @@ Panel {
                   rowIndex: index
                 }
               }
+            }
+          }
+
+          // Settings page sections, top to bottom: preferences → login server.
+          PanelSeparator {
+            visible: root.settingsPage && root.showSettings
+            foreground: root.foreground
+          }
+
+          // Ported from hehh2001/omarchy-tailscale-plus @426b3cc (MIT): the
+          // `tailscale set` switches, read back from `tailscale debug prefs`.
+          Column {
+            visible: root.settingsPage && root.showSettings
+            width: parent.width
+            spacing: Style.space(10)
+
+            PanelSectionHeader {
+              text: "PREFERENCES"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Column {
+              id: settingsColumn
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                model: root.preferenceRows
+                SettingRow {
+                  required property var modelData
+                  required property int index
+                  width: settingsColumn.width
+                  preference: modelData
+                  rowIndex: index
+                }
+              }
+            }
+          }
+
+          PanelSeparator {
+            visible: root.settingsPage && root.showLoginServer
+            foreground: root.foreground
+          }
+
+          Column {
+            visible: root.settingsPage && root.showLoginServer
+            width: parent.width
+            spacing: Style.space(10)
+
+            PanelSectionHeader {
+              text: "LOGIN SERVER"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            LoginServerRow {
+              id: loginServerItem
+              width: parent.width
             }
           }
         }
@@ -917,7 +1093,7 @@ Panel {
     readonly property bool enabledSetting: preference && preference.value === true
     readonly property bool changing: preference && tailscale.changingSetting === String(preference.key || "")
 
-    hasCursor: root.cursorActive && root.focusSection === "settings" && root.settingIndex === rowIndex
+    hasCursor: root.rowHasCursor("settings", rowIndex)
     current: enabledSetting || changing
     foreground: root.foreground
     fill: root.hoverFill
@@ -929,8 +1105,9 @@ Panel {
       hoverEnabled: true
       enabled: !tailscale.busy
       cursorShape: Qt.PointingHandCursor
-      onEntered: root.setSettingCursor(settingRow.rowIndex)
-      onClicked: if (settingRow.preference) tailscale.togglePreference(settingRow.preference.key)
+      onEntered: root.hover("settings", settingRow.rowIndex)
+      onExited: root.unhover("settings", settingRow.rowIndex)
+      onClicked: settingRow.flip()
     }
 
     RowLayout {
@@ -974,9 +1151,15 @@ Panel {
         hasCursor: settingRow.hasCursor
         foreground: root.foreground
         Layout.alignment: Qt.AlignVCenter
-        onHovered: function(on) { if (on) root.setSettingCursor(settingRow.rowIndex) }
-        onToggled: if (settingRow.preference) tailscale.togglePreference(settingRow.preference.key)
+        onHovered: function(on) { if (on) root.hover("settings", settingRow.rowIndex); else root.unhover("settings", settingRow.rowIndex) }
+        onToggled: settingRow.flip()
       }
+    }
+
+    // A click selects the row for the keyboard, then flips the switch.
+    function flip() {
+      root.selectCursor("settings", rowIndex)
+      if (preference) tailscale.togglePreference(preference.key)
     }
   }
 
@@ -987,7 +1170,7 @@ Panel {
     id: loginServerRow
     readonly property bool usable: tailscale.loginServerCheck.ok && !tailscale.loginBusy
 
-    hasCursor: root.cursorActive && root.focusSection === "loginServer"
+    hasCursor: root.rowHasCursor("loginServer", 0)
     current: root.rebindArmed
     foreground: root.foreground
     fill: root.hoverFill
@@ -999,8 +1182,9 @@ Panel {
       hoverEnabled: true
       enabled: loginServerRow.usable
       cursorShape: loginServerRow.usable ? Qt.PointingHandCursor : Qt.ArrowCursor
-      onEntered: root.setLoginServerCursor()
-      onClicked: root.activateRebind()
+      onEntered: root.hover("loginServer", 0)
+      onExited: root.unhover("loginServer", 0)
+      onClicked: { root.selectCursor("loginServer", 0); root.activateRebind() }
     }
 
     RowLayout {
@@ -1051,7 +1235,7 @@ Panel {
   component AuthRow: CursorSurface {
     id: authRow
 
-    hasCursor: root.cursorActive && root.focusSection === "auth"
+    hasCursor: root.rowHasCursor("auth", 0)
     foreground: root.foreground
 
     implicitHeight: row.implicitHeight + Style.spacing.rowPaddingX
@@ -1061,8 +1245,9 @@ Panel {
       hoverEnabled: true
       cursorShape: tailscale.busy ? Qt.ArrowCursor : Qt.PointingHandCursor
       enabled: !tailscale.busy
-      onEntered: root.setAuthCursor()
-      onClicked: tailscale.authorizeTailscaleOperator()
+      onEntered: root.hover("auth", 0)
+      onExited: root.unhover("auth", 0)
+      onClicked: { root.selectCursor("auth", 0); tailscale.authorizeTailscaleOperator() }
     }
 
     RowLayout {
@@ -1116,7 +1301,7 @@ Panel {
     readonly property bool switchingAccount: account && tailscale.switchingAccountId === String(account.id || "")
     readonly property string accountText: account ? tailscale.accountLabel(account) : "Account"
 
-    hasCursor: root.cursorActive && root.focusSection === "accounts" && root.accountIndex === rowIndex
+    hasCursor: root.rowHasCursor("accounts", rowIndex)
     current: selectedAccount
     foreground: root.foreground
     fill: root.hoverFill
@@ -1168,8 +1353,12 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onEntered: root.setAccountCursor(accountRow.rowIndex)
-      onClicked: if (accountRow.account) tailscale.switchAccount(accountRow.account.id)
+      onEntered: root.hover("accounts", accountRow.rowIndex)
+      onExited: root.unhover("accounts", accountRow.rowIndex)
+      onClicked: {
+        root.selectCursor("accounts", accountRow.rowIndex)
+        if (accountRow.account) tailscale.switchAccount(accountRow.account.id)
+      }
     }
   }
 
@@ -1195,7 +1384,7 @@ Panel {
     }
     property int copyIndex: 0
 
-    hasCursor: root.cursorActive && root.focusSection === "peers" && root.peerIndex === rowIndex
+    hasCursor: root.rowHasCursor("peers", rowIndex)
     foreground: root.foreground
 
     implicitHeight: Math.max(peerContent.implicitHeight, copyButton.implicitHeight) + Style.spacing.rowPaddingX
@@ -1234,7 +1423,8 @@ Panel {
       acceptedButtons: Qt.LeftButton
       hoverEnabled: true
       cursorShape: Qt.ArrowCursor
-      onContainsMouseChanged: if (containsMouse) root.setPeerCursor(peerRow.rowIndex)
+      onContainsMouseChanged: if (containsMouse) root.hover("peers", peerRow.rowIndex); else root.unhover("peers", peerRow.rowIndex)
+      onClicked: root.selectCursor("peers", peerRow.rowIndex)
     }
 
     RowLayout {
@@ -1300,7 +1490,7 @@ Panel {
         foreground: root.foreground
         fontFamily: root.fontFamily
         Layout.alignment: Qt.AlignVCenter
-        onClicked: root.sendPeerFile(peerRow.peer)
+        onClicked: { root.selectCursor("peers", peerRow.rowIndex); root.sendPeerFile(peerRow.peer) }
       }
 
       PanelActionButton {
@@ -1310,7 +1500,7 @@ Panel {
         fontFamily: root.fontFamily
         enabled: peerRow.peerIp !== "" || peerRow.peerName !== "" || peerRow.peerDns !== "" || peerRow.peerIpv6 !== ""
         Layout.alignment: Qt.AlignVCenter
-        onClicked: peerRow.openCopyMenu()
+        onClicked: { root.selectCursor("peers", peerRow.rowIndex); peerRow.openCopyMenu() }
       }
 
       Popup {
@@ -1440,7 +1630,7 @@ Panel {
     readonly property string peerName: peer ? String(peer.DisplayName || peer.HostName || "Unknown") + (peer.ExitNode === true && peer.Online !== true ? " (offline)" : "") : "Unknown"
     readonly property string actionTooltip: addMullvad ? "" : (activeExitNode ? "Disconnect" : "Connect")
 
-    hasCursor: root.cursorActive && root.focusSection === "exitNodes" && root.exitNodeIndex === rowIndex
+    hasCursor: root.rowHasCursor("exitNodes", rowIndex)
     current: activeExitNode || settingExitNode || (addMullvad && root.mullvadPickerOpen)
     foreground: root.foreground
     fill: root.hoverFill
@@ -1495,8 +1685,9 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onEntered: root.setExitNodeCursor(exitNodeRow.rowIndex)
-      onClicked: root.chooseExitNode(exitNodeRow.peer)
+      onEntered: root.hover("exitNodes", exitNodeRow.rowIndex)
+      onExited: root.unhover("exitNodes", exitNodeRow.rowIndex)
+      onClicked: { root.selectCursor("exitNodes", exitNodeRow.rowIndex); root.chooseExitNode(exitNodeRow.peer) }
     }
 
     PanelToolTip {
@@ -1518,6 +1709,7 @@ Panel {
     readonly property bool selectedRegion: root.mullvadPickerOpen && root.mullvadRegionIndex === rowIndex
     readonly property string actionTooltip: activeExitNode ? "Disconnect" : "Connect"
 
+    hasCursor: root.hoverSection === "mullvad" && root.hoverIndex === rowIndex
     foreground: root.foreground
     fill: root.hoverFill
     currentFill: root.selectedFill
@@ -1575,8 +1767,9 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onEntered: root.mullvadRegionIndex = regionRow.rowIndex
-      onClicked: root.chooseExitNode(regionRow.peer)
+      onEntered: root.hoverMullvadRegion(regionRow.rowIndex)
+      onExited: root.unhover("mullvad", regionRow.rowIndex)
+      onClicked: { root.mullvadRegionIndex = regionRow.rowIndex; root.chooseExitNode(regionRow.peer) }
     }
 
     PanelToolTip {

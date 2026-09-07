@@ -529,6 +529,67 @@ function parseAccounts(raw) {
   }
 }
 
+// The panel has two pages. Main keeps the hero, connections, exit nodes and
+// machines; the cog in the hero opens Settings, which holds the `tailscale
+// set` switches and the login-server row. Each page lists its cursor sections
+// top to bottom; "header" is always present (cog + switch on main, the back
+// button on settings), the rest only when the data shows them.
+var PAGE_SECTIONS = {
+  main: ["header", "auth", "accounts", "exitNodes", "peers"],
+  settings: ["header", "settings", "loginServer"]
+}
+
+function pageName(page) {
+  return PAGE_SECTIONS.hasOwnProperty(page) ? page : "main"
+}
+
+function pageOrder(page) {
+  return PAGE_SECTIONS[pageName(page)]
+}
+
+function pageSections(page, visible) {
+  var order = pageOrder(page)
+  var list = []
+  for (var i = 0; i < order.length; i++) {
+    var name = order[i]
+    if (name === "header" || (visible && visible[name] === true)) list.push(name)
+  }
+  return list
+}
+
+// Cursor state on entering a page: the cursor lands on the page's header,
+// every per-page list index starts at its first row, and an armed rebind is
+// forgotten — a confirmation never survives a page change.
+function enterPage(page) {
+  return { page: pageName(page), focusSection: "header", headerIndex: 0, settingIndex: 0, rebindArmed: false }
+}
+
+// Esc, in order: an armed rebind disarms, Settings goes back to main, and
+// main closes the panel.
+function escapeAction(page, rebindArmed) {
+  if (rebindArmed === true) return "disarm"
+  if (pageName(page) === "settings") return "back"
+  return "close"
+}
+
+// Pointer → keyboard-cursor discipline. Incident: a pointer left resting on
+// an exit-node row moved the keyboard cursor there, so an Enter meant for the
+// header picked that exit node. Hovering therefore only paints the row; the
+// keyboard cursor — the row Enter/Space act on — moves with j/k, with a
+// click, or with hover only when the hoverSelects setting opts back in.
+function pointerSelects(kind, hoverSelects) {
+  if (kind === "click") return true
+  return kind === "hover" && hoverSelects === true
+}
+
+// A row paints the ring when the pointer is over it, or when the keyboard
+// cursor is active and on it. `hover` is { section, index }; `cursor` is
+// { active, section, index }.
+function rowHasCursor(section, index, hover, cursor) {
+  if (hover && hover.section === section && hover.index === index) return true
+  return !!cursor && cursor.active === true && cursor.section === section && cursor.index === index
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     filterIPv4: filterIPv4,
@@ -560,6 +621,14 @@ if (typeof module !== "undefined") {
     mullvadRegionOptions: mullvadRegionOptions,
     mullvadCountryOptions: mullvadCountryOptions,
     parseStatus: parseStatus,
-    parseAccounts: parseAccounts
+    parseAccounts: parseAccounts,
+    PAGE_SECTIONS: PAGE_SECTIONS,
+    pageName: pageName,
+    pageOrder: pageOrder,
+    pageSections: pageSections,
+    enterPage: enterPage,
+    escapeAction: escapeAction,
+    pointerSelects: pointerSelects,
+    rowHasCursor: rowHasCursor
   }
 }

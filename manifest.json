@@ -20,7 +20,8 @@
     "defaultSection": "right",
     "defaults": {
       "refreshIntervalSec": 30,
-      "loginServer": ""
+      "loginServer": "",
+      "hoverSelects": false
     },
     "schema": [
       {
@@ -38,6 +39,13 @@
         "label": "Login server URL",
         "description": "Headscale or another control server, e.g. https://headscale.example.com. Empty = official Tailscale. Used for fresh logins only; changing servers is confirmed in the panel.",
         "defaultValue": ""
+      },
+      {
+        "key": "hoverSelects",
+        "type": "boolean",
+        "label": "Hover moves the keyboard cursor",
+        "description": "Off: hovering only highlights a row; Enter/Space act on the row last reached with j/k or a click. On: the pointer also moves the keyboard cursor.",
+        "defaultValue": false
       }
     ]
   },

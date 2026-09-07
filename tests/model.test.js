@@ -260,6 +260,59 @@ assert.equal(model.profileListed([{ id: "2c0a" }, { id: "9f" }], "9f"), true)
 assert.equal(model.profileListed([{ id: "2c0a" }], "9f"), false)
 assert.equal(model.profileListed(null, "9f"), false)
 
+// --- pages ---------------------------------------------------------------------------
+// Main keeps hero → connections → exit nodes → machines; the cog opens Settings,
+// which holds the switches and the login-server row. A section is listed only
+// on its own page, and only when the data shows it; "header" is always there.
+const everything = { auth: true, loginServer: true, accounts: true, exitNodes: true, settings: true, peers: true }
+assert.deepEqual(model.pageSections("main", everything), ["header", "auth", "accounts", "exitNodes", "peers"], "main page order")
+assert.deepEqual(model.pageSections("settings", everything), ["header", "settings", "loginServer"], "settings page order")
+assert.deepEqual(model.pageSections("main", { auth: false, accounts: true, exitNodes: false, peers: true, settings: true, loginServer: true }), ["header", "accounts", "peers"], "hidden sections drop out; settings never on main")
+assert.deepEqual(model.pageSections("settings", { settings: false, loginServer: true, peers: true }), ["header", "loginServer"], "settings page without switches keeps the login-server row; peers never on settings")
+assert.deepEqual(model.pageSections("settings", {}), ["header"], "the header is the one section that never disappears")
+assert.deepEqual(model.pageSections("bogus", everything), model.pageSections("main", everything), "unknown page = main")
+assert.deepEqual(model.pageSections("main", { auth: "true" }), ["header"], "visibility is strictly boolean")
+assert.deepEqual(model.pageOrder("settings"), model.PAGE_SECTIONS.settings)
+assert.deepEqual(model.pageOrder("nope"), model.PAGE_SECTIONS.main)
+assert.equal(model.pageName("settings"), "settings")
+assert.equal(model.pageName("hasOwnProperty"), "main", "only real pages resolve")
+
+// Entering a page resets the cursor: header, first switch, nothing armed.
+assert.deepEqual(model.enterPage("settings"), { page: "settings", focusSection: "header", headerIndex: 0, settingIndex: 0, rebindArmed: false })
+assert.deepEqual(model.enterPage("main"), { page: "main", focusSection: "header", headerIndex: 0, settingIndex: 0, rebindArmed: false })
+assert.equal(model.enterPage(undefined).page, "main", "no page = main")
+
+// Esc: disarm first, then back out of Settings, then close.
+assert.equal(model.escapeAction("settings", true), "disarm", "an armed rebind is disarmed before anything else")
+assert.equal(model.escapeAction("main", true), "disarm")
+assert.equal(model.escapeAction("settings", false), "back", "Esc on Settings returns to main")
+assert.equal(model.escapeAction("main", false), "close", "a second Esc closes")
+assert.equal(model.escapeAction("nonsense", false), "close", "unknown page behaves as main")
+assert.equal(model.escapeAction("settings", "yes"), "back", "armed is strictly boolean")
+
+// --- pointer vs keyboard cursor ---------------------------------------------------
+// Incident (2026-09-07): the pointer rested on an exit-node row, hover moved the
+// keyboard cursor there, and an Enter meant for the header selected that exit
+// node. Hover may paint; only j/k, a click, or the hoverSelects setting may
+// move what Enter acts on.
+assert.equal(model.pointerSelects("hover", false), false, "hover never moves the keyboard cursor by default")
+assert.equal(model.pointerSelects("hover", undefined), false, "unset setting = off")
+assert.equal(model.pointerSelects("hover", "true"), false, "the setting is strictly boolean")
+assert.equal(model.pointerSelects("hover", true), true, "hoverSelects opts back in")
+assert.equal(model.pointerSelects("click", false), true, "a click always selects")
+assert.equal(model.pointerSelects("wheel", true), false, "nothing else selects")
+
+const hoverOn = { section: "exitNodes", index: 0 }
+const noHover = { section: "", index: -1 }
+const cursorOnHeader = { active: true, section: "header", index: 0 }
+assert.equal(model.rowHasCursor("exitNodes", 0, hoverOn, cursorOnHeader), true, "the hovered row paints")
+assert.equal(model.rowHasCursor("header", 0, hoverOn, cursorOnHeader), true, "…and so does the keyboard cursor's row, at the same time")
+assert.equal(model.rowHasCursor("exitNodes", 1, hoverOn, cursorOnHeader), false)
+assert.equal(model.rowHasCursor("header", 0, noHover, { active: false, section: "header", index: 0 }), false, "an inactive keyboard cursor paints nothing")
+assert.equal(model.rowHasCursor("header", 0, noHover, { active: "yes", section: "header", index: 0 }), false, "active is strictly boolean")
+assert.equal(model.rowHasCursor("header", 1, noHover, cursorOnHeader), false, "index must match")
+assert.equal(model.rowHasCursor("header", 0, null, null), false)
+
 // --- keyboard dispatch table (Panel.qml) ----------------------------------------------
 // The panel's key handling is QML; the table is asserted structurally against the
 // source so a binding cannot silently vanish. j/k/arrows, Enter/Space and Esc are
@@ -286,10 +339,19 @@ for (const peerKey of ["c", "n", "d", "s"]) {
   assert.ok(line.indexOf("root.peerShortcut(") !== -1, peerKey + " goes through peerShortcut (peers section only)")
 }
 assert.ok(/function peerShortcut\(action\) \{\s*if \(focusSection !== "peers" \|\| !cursorActive\)/.test(panel), "peerShortcut refuses outside the peers section")
-assert.ok(/onCloseRequested: \{\s*if \(root\.rebindArmed\) root\.rebindArmed = false\s*else root\.close\(\)/.test(panel), "Esc disarms the rebind before it closes")
-const order = panel.match(/function sectionList\(\) \{([^]*?)\n  \}/)[1].match(/push\("(\w+)"\)/g).map(s => s.slice(6, -2))
-assert.deepEqual(order, ["auth", "loginServer", "accounts", "exitNodes", "settings", "peers"], "cursor order: accounts → exit nodes → settings → peers")
+assert.ok(/onCloseRequested: \{\s*var action = Model\.escapeAction\(root\.page, root\.rebindArmed\)\s*if \(action === "disarm"\) root\.rebindArmed = false\s*else if \(action === "back"\) root\.closeSettings\(\)\s*else root\.close\(\)/.test(panel), "Esc goes through Model.escapeAction: disarm → back → close")
+assert.ok(/function sectionList\(\) \{\s*return Model\.pageSections\(page, \{/.test(panel), "the cursor walks Model.pageSections for the current page")
+assert.ok(/function showPage\(next\) \{\s*var entered = Model\.enterPage\(next\)/.test(panel), "page changes go through Model.enterPage")
 assert.ok(/onActivateRequested: if \(root\.cursorActive\) root\.activateCursor\(\)/.test(panel), "Enter/Space activate")
 assert.ok(/onMoveRequested: function\(dx, dy\)/.test(panel), "j/k/arrows move")
+// Every pointer-enter site paints through root.hover / header.hover*, and the
+// keyboard cursor moves only through Model.pointerSelects inside hover().
+const enterSites = panel.split("\n").filter(l => /^\s*(onEntered|onHovered|onContainsMouseChanged):/.test(l))
+assert.ok(enterSites.length >= 10, "pointer-enter sites found: " + enterSites.length)
+for (const line of enterSites) {
+  assert.ok(/root\.hover(MullvadRegion)?\(|header\.hover(Cog|Toggle)\(|copyChoice\.hovered\(\)|peerRow\.copyIndex = index/.test(line), "hover paints only: " + line.trim())
+  assert.ok(!/selectCursor|cursorActive|focusSection|Index = /.test(line.replace("peerRow.copyIndex = index", "")), "hover never moves the keyboard cursor: " + line.trim())
+}
+assert.ok(/function hover\(section, index\) \{\s*hoverSection = section\s*hoverIndex = index\s*if \(Model\.pointerSelects\("hover", hoverSelects\)\) selectCursor\(section, index\)/.test(panel), "hover() defers to Model.pointerSelects")
 
 console.log("model tests passed")

@@ -10,10 +10,11 @@ Native Omarchy bar widget for Tailscale, forked from the first-party
 - Right click toggles Tailscale on/off
 - Switch between available Tailscale connections when multiple are available
 - Exit nodes: tailnet peers plus Mullvad regions, with recents
-- Settings: the `tailscale set` switches (Tailscale DNS, subnet routes, LAN
-  access, shields up, Tailscale SSH, web management, offer as exit node,
-  update notifications, automatic updates, device posture), read back from
-  `tailscale debug prefs` on every refresh
+- Settings page, behind the cog in the panel header: the `tailscale set`
+  switches (Tailscale DNS, subnet routes, LAN access, shields up, Tailscale
+  SSH, web management, offer as exit node, update notifications, automatic
+  updates, device posture), read back from `tailscale debug prefs` on every
+  refresh, and the login-server row
 - Headscale / alternate control server via the `loginServer` setting
 - Browse machines from `tailscale status --json`
 - Copy a machine's Tailscale IP, host name, or DNS name
@@ -21,22 +22,31 @@ Native Omarchy bar widget for Tailscale, forked from the first-party
 
 ## Keyboard shortcuts
 
-Inside the panel the cursor walks the sections top to bottom:
-header switch → operator / login-server rows → connections → exit nodes →
-settings → machines.
+The panel has two pages. On the main page the cursor walks the sections top
+to bottom: header (cog, on/off switch) → operator row → connections → exit
+nodes → machines. The cog opens the Settings page, where the cursor walks
+header (back) → switches → login-server row. Every open starts on the main
+page.
 
 | Key | Action |
 | --- | --- |
 | `j` / `k`, `↓` / `↑` | move the cursor (into the next section at either end of a list) |
-| `Enter` / `Space` | activate the row: toggle, switch connection, pick exit node, flip a setting, open the copy menu |
+| `h` / `l`, `←` / `→` | in the header, move between the cog and the switch |
+| `Enter` / `Space` | activate the row: open Settings (cog), toggle, switch connection, pick exit node, flip a setting, open the copy menu, go back (Settings header) |
 | `c` | copy the selected machine's IPv4 (machines section only) |
 | `n` | copy the selected machine's name (machines section only) |
 | `d` | copy the selected machine's DNS name (machines section only) |
 | `s` | send files to the selected machine with Taildrop (machines section only) |
 | `t` | toggle Tailscale on/off (no confirmation, as before) |
-| `r` | refresh status, prefs and connections now |
-| `Esc` | disarm a pending login-server change, otherwise close the panel |
+| `r` | refresh status, prefs and connections now (both pages) |
+| `Esc` | disarm a pending login-server change; otherwise leave the Settings page; otherwise close the panel |
 | `Tab` / `Shift+Tab` | switch to the neighbouring panel |
+
+Pointer and keyboard are separate: hovering a row only highlights it, and
+`Enter`/`Space` act on the row the keyboard cursor was last moved to with
+`j`/`k` or a click — a pointer left resting on the panel can never redirect
+an `Enter`. The `hoverSelects` setting ("Hover moves the keyboard cursor")
+restores the shell's hover-follows-pointer behaviour.
 
 Machine keys pressed with the cursor elsewhere do nothing except say so in the
 status line.
@@ -51,10 +61,10 @@ guessed. An invalid value is shown in the panel and nothing runs.
 
 Turning Tailscale on is always a plain `tailscale up` and never changes
 servers. When the configured server differs from the one this profile is bound
-to (the panel hero shows the current `ControlURL`), a *Log in to …* row appears
-under Connections. Activating it once arms it — the row states that it will
-log out of the current server and remove that profile — and activating it again
-runs, in order:
+to (the panel header shows the current `ControlURL`), a *Log in to …* row
+appears under *Login server* on the Settings page. Activating it once arms it —
+the row states that it will log out of the current server and remove that
+profile — and activating it again runs, in order:
 
 1. `tailscale logout` (deletes the current profile)
 2. `pkexec tailscale set --operator=$USER` (logout leaves the new empty profile
