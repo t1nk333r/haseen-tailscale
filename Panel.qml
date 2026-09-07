@@ -17,7 +17,11 @@ Panel {
   property int accountIndex: 0
   property int peerIndex: 0
   property int exitNodeIndex: 0
+  property int settingIndex: 0
   property int mullvadRegionIndex: 0
+  // Rebinding to another control server logs out and deletes this profile:
+  // one activation arms the row, a second fires it, Esc disarms.
+  property bool rebindArmed: false
   property bool cursorActive: false
   property bool copyMenuOpen: false
   property bool mullvadPickerOpen: false
@@ -42,12 +46,37 @@ Panel {
   readonly property color online: "#00ff88"
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property bool showConnections: tailscale.accounts.length > 1 || tailscale.accountsAccessDenied
+  readonly property bool showLoginServer: tailscale.installed && (tailscale.loginServerDiffers || !tailscale.loginServerCheck.ok)
+  readonly property bool showConnections: tailscale.accounts.length > 1 || tailscale.accountsAccessDenied || showLoginServer
   readonly property bool showPeers: tailscale.active && tailscale.peers.length > 0
+  readonly property bool showSettings: tailscale.installed && tailscale.active && tailscale.prefsLoaded
   readonly property var recentMullvadRegions: settings.recentMullvadRegions instanceof Array ? settings.recentMullvadRegions : (settings.recentMullvadCountries instanceof Array ? settings.recentMullvadCountries : [])
   readonly property var recentMullvadExitNodes: recentMullvadNodes()
   readonly property var exitNodes: displayExitNodes()
-  readonly property bool showExitNodes: tailscale.active && (exitNodes.length > 0 || tailscale.mullvadRegions.length > 0)
+  readonly property bool showExitNodes: tailscale.active && (exitNodes.length > 0 || tailscale.mullvadRegions.length > 0 || tailscale.exitNodeActive)
+  // Ported from hehh2001/omarchy-tailscale-plus @426b3cc (MIT): what the
+  // exit-node section says it is using comes from the persisted preference
+  // read on the last refresh, never from a row the panel remembers clicking.
+  readonly property var exitNodeSummary: tailscale.exitNodeStateFor(exitNodes, tailscale.exitNodeActive, tailscale.exitNodeId, tailscale.exitNodeIp)
+  // Labels as hehh2001/omarchy-tailscale-plus @426b3cc (MIT) labels them.
+  readonly property var preferenceRows: [
+    { key: "acceptDns", label: "Tailscale DNS", detail: "Use DNS supplied by the active tailnet", value: tailscale.acceptDns },
+    { key: "acceptRoutes", label: "Use subnet routes", detail: "Accept routes advertised by other machines", value: tailscale.acceptRoutes },
+    { key: "allowLanAccess", label: "Local network access", detail: "Keep direct LAN access while using an exit node", value: tailscale.allowLanAccess },
+    { key: "shieldsUp", label: "Block incoming connections", detail: "Reject incoming Tailscale connections", value: tailscale.shieldsUp },
+    { key: "runSsh", label: "Tailscale SSH", detail: "Allow SSH according to tailnet policy", value: tailscale.runSsh },
+    { key: "runWebClient", label: "Web management", detail: "Expose the Tailscale web UI on port 5252", value: tailscale.runWebClient },
+    { key: "advertiseExitNode", label: "Offer as exit node", detail: "Advertise this machine as an internet gateway", value: tailscale.advertiseExitNode },
+    { key: "updateCheck", label: "Update notifications", detail: "Check for available Tailscale updates", value: tailscale.updateCheck },
+    { key: "autoUpdate", label: "Automatic updates", detail: "Install Tailscale updates automatically", value: tailscale.autoUpdate },
+    { key: "reportPosture", label: "Device posture", detail: "Allow posture collection by the control plane", value: tailscale.reportPosture }
+  ]
+  readonly property string rebindTitle: !tailscale.loginServerCheck.ok ? "Login server setting is invalid" : (rebindArmed ? "Press again to confirm" : "Log in to " + tailscale.loginServerUrl)
+  readonly property string rebindDetail: !tailscale.loginServerCheck.ok
+    ? tailscale.loginServerCheck.error
+    : (rebindArmed
+      ? "Logs out of " + tailscale.controlUrl + " and removes that profile · Esc cancels"
+      : "Logs out of " + tailscale.controlUrl + " first; confirmed before anything runs")
   readonly property var filteredMullvadRegions: filteredMullvadRegionNodes()
   // Only claim the header cursor when the switch is actually on screen —
   // "header" stays navigable, but an absent CLI leaves nothing to highlight.
@@ -178,62 +207,78 @@ Panel {
     return tailscale.accounts[Math.max(0, Math.min(accountIndex, tailscale.accounts.length - 1))]
   }
 
+  // The keyboard cursor walks these sections top to bottom; each one is a
+  // list with its own index. Adding a section means adding it here and to
+  // sectionCount/sectionIndex, not to a chain of fallbacks.
+  function sectionList() {
+    var list = ["header"]
+    if (tailscale.accountsAccessDenied) list.push("auth")
+    if (showLoginServer) list.push("loginServer")
+    if (tailscale.accounts.length > 1) list.push("accounts")
+    if (showExitNodes) list.push("exitNodes")
+    if (showSettings) list.push("settings")
+    if (showPeers) list.push("peers")
+    return list
+  }
+
+  function sectionCount(name) {
+    if (name === "accounts") return tailscale.accounts.length
+    if (name === "exitNodes") return exitNodes.length
+    if (name === "settings") return preferenceRows.length
+    if (name === "peers") return tailscale.peers.length
+    return 1
+  }
+
+  function sectionIndex(name) {
+    if (name === "accounts") return accountIndex
+    if (name === "exitNodes") return exitNodeIndex
+    if (name === "settings") return settingIndex
+    if (name === "peers") return peerIndex
+    return 0
+  }
+
+  function setSectionIndex(name, index) {
+    var value = Math.max(0, Math.min(index, sectionCount(name) - 1))
+    if (name === "accounts") accountIndex = value
+    else if (name === "exitNodes") exitNodeIndex = value
+    else if (name === "settings") settingIndex = value
+    else if (name === "peers") peerIndex = value
+  }
+
   function ensureCursor() {
-    if (headerIndex < 0) headerIndex = 0
-    if (headerIndex > 0) headerIndex = 0
-    if (accountIndex >= tailscale.accounts.length) accountIndex = Math.max(0, tailscale.accounts.length - 1)
-    if (peerIndex >= tailscale.peers.length) peerIndex = Math.max(0, tailscale.peers.length - 1)
-    if (exitNodeIndex >= exitNodes.length) exitNodeIndex = Math.max(0, exitNodes.length - 1)
+    headerIndex = 0
+    setSectionIndex("accounts", accountIndex)
+    setSectionIndex("peers", peerIndex)
+    setSectionIndex("exitNodes", exitNodeIndex)
+    setSectionIndex("settings", settingIndex)
     if (mullvadRegionIndex >= filteredMullvadRegions.length) mullvadRegionIndex = Math.max(0, filteredMullvadRegions.length - 1)
-    if (focusSection === "auth" && !tailscale.accountsAccessDenied) focusSection = tailscale.accounts.length > 1 ? "accounts" : (showExitNodes ? "exitNodes" : (showPeers ? "peers" : "header"))
-    if (focusSection === "accounts" && tailscale.accounts.length <= 1) focusSection = tailscale.accountsAccessDenied ? "auth" : (showExitNodes ? "exitNodes" : (showPeers ? "peers" : "header"))
-    if (focusSection === "peers" && !showPeers) focusSection = showExitNodes ? "exitNodes" : (tailscale.accountsAccessDenied ? "auth" : (tailscale.accounts.length > 1 ? "accounts" : "header"))
-    if (focusSection === "exitNodes" && !showExitNodes) focusSection = showPeers ? "peers" : (tailscale.accountsAccessDenied ? "auth" : (tailscale.accounts.length > 1 ? "accounts" : "header"))
+    var list = sectionList()
+    if (list.indexOf(focusSection) !== -1) return
+    // The section under the cursor went away: land on the nearest one that
+    // is still visible, preferring the one below it.
+    var order = ["header", "auth", "loginServer", "accounts", "exitNodes", "settings", "peers"]
+    var from = order.indexOf(focusSection)
+    for (var below = from + 1; below < order.length; below++) if (list.indexOf(order[below]) !== -1) { focusSection = order[below]; return }
+    for (var above = from - 1; above >= 0; above--) if (list.indexOf(order[above]) !== -1) { focusSection = order[above]; return }
+    focusSection = "header"
   }
 
   function moveCursor(dx, dy) {
     cursorActive = true
     ensureCursor()
     if (dy !== 0) {
-      if (focusSection === "header") {
-        if (dy > 0) {
-          if (tailscale.accountsAccessDenied) focusSection = "auth"
-          else if (tailscale.accounts.length > 1) focusSection = "accounts"
-          else if (showExitNodes) focusSection = "exitNodes"
-          else if (showPeers) focusSection = "peers"
-        }
-      } else if (focusSection === "auth") {
-        if (dy < 0) focusSection = "header"
-        else if (tailscale.accounts.length > 1) focusSection = "accounts"
-        else if (showExitNodes) focusSection = "exitNodes"
-        else if (showPeers) focusSection = "peers"
-      } else if (focusSection === "accounts") {
-        if (dy < 0) {
-          if (accountIndex <= 0) focusSection = tailscale.accountsAccessDenied ? "auth" : "header"
-          else accountIndex--
-        } else {
-          if (accountIndex < tailscale.accounts.length - 1) accountIndex++
-          else if (showExitNodes) focusSection = "exitNodes"
-          else if (showPeers) focusSection = "peers"
-        }
-      } else if (focusSection === "peers") {
-        if (dy < 0) {
-          if (peerIndex <= 0) focusSection = showExitNodes ? "exitNodes" : (tailscale.accounts.length > 1 ? "accounts" : (tailscale.accountsAccessDenied ? "auth" : "header"))
-          else peerIndex--
-        } else if (peerIndex < tailscale.peers.length - 1) {
-          peerIndex++
-        }
-      } else if (focusSection === "exitNodes") {
-        if (dy < 0) {
-          if (exitNodeIndex <= 0) focusSection = tailscale.accounts.length > 1 ? "accounts" : (tailscale.accountsAccessDenied ? "auth" : "header")
-          else exitNodeIndex--
-        } else if (exitNodeIndex < exitNodes.length - 1) {
-          exitNodeIndex++
-        } else if (showPeers) {
-          focusSection = "peers"
-        }
+      var list = sectionList()
+      var pos = list.indexOf(focusSection)
+      var index = sectionIndex(focusSection)
+      if (dy > 0) {
+        if (index < sectionCount(focusSection) - 1) setSectionIndex(focusSection, index + 1)
+        else if (pos < list.length - 1) { focusSection = list[pos + 1]; setSectionIndex(focusSection, 0) }
+      } else {
+        if (index > 0) setSectionIndex(focusSection, index - 1)
+        else if (pos > 0) { focusSection = list[pos - 1]; setSectionIndex(focusSection, sectionCount(focusSection) - 1) }
       }
     }
+    if (focusSection !== "loginServer") rebindArmed = false
     ensureCursor()
     scrollCursorIntoView()
   }
@@ -244,6 +289,8 @@ Panel {
       tailscale.toggleTailscale()
     } else if (focusSection === "auth") {
       tailscale.authorizeTailscaleOperator()
+    } else if (focusSection === "loginServer") {
+      activateRebind()
     } else if (focusSection === "accounts") {
       var account = selectedAccount()
       if (account) tailscale.switchAccount(account.id)
@@ -251,7 +298,26 @@ Panel {
       openSelectedPeerCopyMenu()
     } else if (focusSection === "exitNodes") {
       chooseExitNode(selectedExitNode())
+    } else if (focusSection === "settings") {
+      if (settingIndex >= 0 && settingIndex < preferenceRows.length) tailscale.togglePreference(preferenceRows[settingIndex].key)
     }
+  }
+
+  // First activation arms, second fires; anything else disarms.
+  function activateRebind() {
+    if (!tailscale.loginServerCheck.ok || tailscale.loginBusy) return
+    if (!rebindArmed) { rebindArmed = true; return }
+    rebindArmed = false
+    tailscale.rebindLoginServer()
+  }
+
+  // Peer shortcuts act on the machine under the cursor and nothing else.
+  function peerShortcut(action) {
+    if (focusSection !== "peers" || !cursorActive) {
+      tailscale.notice("Move the cursor into Machines first (j/k)")
+      return
+    }
+    action(selectedPeer())
   }
 
   function moveMullvadRegionCursor(delta) {
@@ -285,6 +351,7 @@ Panel {
   function scrollCursorIntoView() {
     if (focusSection === "peers" && peerColumn && peerIndex >= 0 && peerIndex < peerColumn.children.length) scrollItemIntoView(peerColumn.children[peerIndex])
     else if (focusSection === "exitNodes" && exitNodeColumn && exitNodeIndex >= 0 && exitNodeIndex < exitNodeColumn.children.length) scrollItemIntoView(exitNodeColumn.children[exitNodeIndex])
+    else if (focusSection === "settings" && settingsColumn && settingIndex >= 0 && settingIndex < settingsColumn.children.length) scrollItemIntoView(settingsColumn.children[settingIndex])
   }
 
   function scrollMullvadRegionCursorIntoView() {
@@ -318,6 +385,18 @@ Panel {
     scrollCursorIntoView()
   }
 
+  function setSettingCursor(index) {
+    cursorActive = true
+    focusSection = "settings"
+    settingIndex = index
+    scrollCursorIntoView()
+  }
+
+  function setLoginServerCursor() {
+    cursorActive = true
+    focusSection = "loginServer"
+  }
+
   function setAccountCursor(index) {
     cursorActive = true
     focusSection = "accounts"
@@ -340,16 +419,22 @@ Panel {
 
   onOpenedChanged: if (opened) {
     cursorActive = false
+    rebindArmed = false
     if (panelFlick) panelFlick.contentY = 0
     tailscale.refresh()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  } else {
+    rebindArmed = false
   }
   onPeerIndexChanged: scrollCursorIntoView()
   onExitNodeIndexChanged: scrollCursorIntoView()
+  onSettingIndexChanged: scrollCursorIntoView()
   onMullvadRegionIndexChanged: if (mullvadPickerOpen) scrollMullvadRegionCursorIntoView()
   onShowConnectionsChanged: ensureCursor()
+  onShowLoginServerChanged: { rebindArmed = false; ensureCursor() }
   onShowPeersChanged: ensureCursor()
   onShowExitNodesChanged: ensureCursor()
+  onShowSettingsChanged: ensureCursor()
   onFilteredMullvadRegionsChanged: ensureCursor()
 
   Service {
@@ -420,14 +505,19 @@ Panel {
         root.moveCursor(dx, dy)
       }
       onActivateRequested: if (root.cursorActive) root.activateCursor()
-      onCloseRequested: root.close()
+      onCloseRequested: {
+        if (root.rebindArmed) root.rebindArmed = false
+        else root.close()
+      }
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      // j/k/arrows, Enter/Space and Esc arrive as signals from PanelKeyCatcher.
       onTextKey: function(t) {
         if (t === "t" || t === "T") tailscale.toggleTailscale()
-        else if (t === "c" || t === "C") tailscale.copyPeerIp(root.selectedPeer())
-        else if (t === "n" || t === "N") tailscale.copyPeerName(root.selectedPeer())
-        else if (t === "d" || t === "D") tailscale.copyPeerDnsName(root.selectedPeer())
-        else if (t === "s" || t === "S") root.sendPeerFile(root.selectedPeer())
+        else if (t === "r" || t === "R") tailscale.refresh(true)
+        else if (t === "c" || t === "C") root.peerShortcut(function(peer) { tailscale.copyPeerIp(peer) })
+        else if (t === "n" || t === "N") root.peerShortcut(function(peer) { tailscale.copyPeerName(peer) })
+        else if (t === "d" || t === "D") root.peerShortcut(function(peer) { tailscale.copyPeerDnsName(peer) })
+        else if (t === "s" || t === "S") root.peerShortcut(function(peer) { root.sendPeerFile(peer) })
       }
 
       Flickable {
@@ -449,7 +539,7 @@ Panel {
           Item {
             id: header
             width: parent.width
-            implicitHeight: hero.implicitHeight
+            implicitHeight: hero.implicitHeight + (controlServerLine.visible ? controlServerLine.implicitHeight + Style.space(4) : 0)
             // Exposed for the hero's trailingControl, whose `root` resolves to
             // PanelHero (not this Panel) — reach panel state via `header`.
             readonly property bool ringVisible: root.headerHasCursor
@@ -496,6 +586,23 @@ Panel {
                 }
               }
             }
+
+            // Which control server this profile is bound to, straight from
+            // `tailscale debug prefs` on the last refresh.
+            Text {
+              id: controlServerLine
+              visible: tailscale.installed && tailscale.prefsLoaded
+              anchors.top: hero.bottom
+              anchors.topMargin: Style.space(4)
+              anchors.left: parent.left
+              anchors.right: parent.right
+              textFormat: Text.PlainText
+              text: tailscale.controlUrl === "" ? "Not bound to a control server" : "Control server · " + tailscale.controlUrl
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideMiddle
+            }
           }
 
           Text {
@@ -506,6 +613,18 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
+          }
+
+          // An AuthURL that is not a web URL is never opened; show it to copy.
+          Text {
+            visible: tailscale.blockedAuthUrl !== ""
+            width: parent.width
+            textFormat: Text.PlainText
+            text: "Login link (not opened): " + tailscale.blockedAuthUrl
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WrapAnywhere
           }
 
           CursorSurface {
@@ -549,6 +668,11 @@ Panel {
               width: parent.width
             }
 
+            LoginServerRow {
+              visible: root.showLoginServer
+              width: parent.width
+            }
+
             Repeater {
               model: tailscale.accounts
               AccountRow {
@@ -575,6 +699,16 @@ Panel {
               text: "EXIT NODES"
               foreground: root.foreground
               fontFamily: root.fontFamily
+            }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "Using · " + root.exitNodeSummary.label
+              color: root.exitNodeSummary.kind === "offline" || root.exitNodeSummary.kind === "unavailable" ? root.urgent : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
             }
 
             Column {
@@ -666,6 +800,42 @@ Panel {
           }
 
           PanelSeparator {
+            visible: root.showSettings
+            foreground: root.foreground
+          }
+
+          // Ported from hehh2001/omarchy-tailscale-plus @426b3cc (MIT): the
+          // `tailscale set` switches, read back from `tailscale debug prefs`.
+          Column {
+            visible: root.showSettings
+            width: parent.width
+            spacing: Style.space(10)
+
+            PanelSectionHeader {
+              text: "SETTINGS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Column {
+              id: settingsColumn
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                model: root.preferenceRows
+                SettingRow {
+                  required property var modelData
+                  required property int index
+                  width: settingsColumn.width
+                  preference: modelData
+                  rowIndex: index
+                }
+              }
+            }
+          }
+
+          PanelSeparator {
             visible: tailscale.installed && tailscale.active
             foreground: root.foreground
           }
@@ -734,6 +904,147 @@ Panel {
     PropertyAnimation {
       target: hero; property: "metaOpacity"
       to: 1.0; duration: 260; easing.type: Easing.InQuad
+    }
+  }
+
+  // Ported from hehh2001/omarchy-tailscale-plus @426b3cc (MIT): one row per
+  // `tailscale set` switch, highlighted when on and dimmed when off with the
+  // same fills the exit-node rows use.
+  component SettingRow: CursorSurface {
+    id: settingRow
+    property var preference: null
+    property int rowIndex: 0
+    readonly property bool enabledSetting: preference && preference.value === true
+    readonly property bool changing: preference && tailscale.changingSetting === String(preference.key || "")
+
+    hasCursor: root.cursorActive && root.focusSection === "settings" && root.settingIndex === rowIndex
+    current: enabledSetting || changing
+    foreground: root.foreground
+    fill: root.hoverFill
+    currentFill: root.selectedFill
+    implicitHeight: settingContent.implicitHeight + Style.spacing.rowPaddingX
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      enabled: !tailscale.busy
+      cursorShape: Qt.PointingHandCursor
+      onEntered: root.setSettingCursor(settingRow.rowIndex)
+      onClicked: if (settingRow.preference) tailscale.togglePreference(settingRow.preference.key)
+    }
+
+    RowLayout {
+      id: settingContent
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(8)
+      spacing: Style.space(8)
+
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(1)
+
+        Text {
+          Layout.fillWidth: true
+          textFormat: Text.PlainText
+          text: settingRow.preference ? String(settingRow.preference.label || "") : ""
+          color: settingRow.enabledSetting ? root.foreground : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: settingRow.enabledSetting
+          elide: Text.ElideRight
+        }
+
+        Text {
+          Layout.fillWidth: true
+          textFormat: Text.PlainText
+          text: settingRow.preference ? String(settingRow.preference.detail || "") : ""
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+
+      ToggleSwitch {
+        checked: settingRow.enabledSetting
+        busy: tailscale.busy
+        hasCursor: settingRow.hasCursor
+        foreground: root.foreground
+        Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.setSettingCursor(settingRow.rowIndex) }
+        onToggled: if (settingRow.preference) tailscale.togglePreference(settingRow.preference.key)
+      }
+    }
+  }
+
+  // Log in to the configured control server. Because that logs out of the
+  // current one and deletes its profile, the row arms on the first activation
+  // and fires on the second; moving the cursor or Esc disarms it.
+  component LoginServerRow: CursorSurface {
+    id: loginServerRow
+    readonly property bool usable: tailscale.loginServerCheck.ok && !tailscale.loginBusy
+
+    hasCursor: root.cursorActive && root.focusSection === "loginServer"
+    current: root.rebindArmed
+    foreground: root.foreground
+    fill: root.hoverFill
+    currentFill: root.selectedFill
+    implicitHeight: loginServerContent.implicitHeight + Style.spacing.rowPaddingX
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      enabled: loginServerRow.usable
+      cursorShape: loginServerRow.usable ? Qt.PointingHandCursor : Qt.ArrowCursor
+      onEntered: root.setLoginServerCursor()
+      onClicked: root.activateRebind()
+    }
+
+    RowLayout {
+      id: loginServerContent
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(8)
+
+      Text {
+        text: "󰍂"
+        color: tailscale.loginServerCheck.ok ? (root.rebindArmed ? root.urgent : root.foreground) : root.urgent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.heading
+        Layout.alignment: Qt.AlignVCenter
+      }
+
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(1)
+
+        Text {
+          Layout.fillWidth: true
+          textFormat: Text.PlainText
+          text: root.rebindTitle
+          color: tailscale.loginServerCheck.ok ? root.foreground : root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: root.rebindArmed
+          elide: Text.ElideMiddle
+        }
+
+        Text {
+          Layout.fillWidth: true
+          textFormat: Text.PlainText
+          text: root.rebindDetail
+          color: root.rebindArmed ? root.urgent : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+      }
     }
   }
 
@@ -1124,7 +1435,9 @@ Panel {
     readonly property bool addMullvad: peer && peer.AddMullvad === true
     readonly property bool activeExitNode: peer && peer.ExitNode === true
     readonly property bool settingExitNode: peer && tailscale.settingExitNodeId === String(peer.id || "")
-    readonly property string peerName: peer ? String(peer.DisplayName || peer.HostName || "Unknown") : "Unknown"
+    // Ported from hehh2001/omarchy-tailscale-plus @426b3cc (MIT): a selected
+    // node that dropped offline stays listed and says so.
+    readonly property string peerName: peer ? String(peer.DisplayName || peer.HostName || "Unknown") + (peer.ExitNode === true && peer.Online !== true ? " (offline)" : "") : "Unknown"
     readonly property string actionTooltip: addMullvad ? "" : (activeExitNode ? "Disconnect" : "Connect")
 
     hasCursor: root.cursorActive && root.focusSection === "exitNodes" && root.exitNodeIndex === rowIndex
