@@ -1,7 +1,8 @@
-# My Tailscale (Omarchy widget)
+# Tailscale
 
-Native Omarchy bar widget for Tailscale, forked from the first-party
-`omarchy.tailscale` and extended.
+Tailscale bar widget, a [haseen](https://github.com/t1nk333r/haseen) plugin
+(also runs on Omarchy), forked from the first-party `omarchy.tailscale` and
+extended.
 
 ## Features
 
@@ -106,6 +107,14 @@ runs the same loop by hand.
 ## Icon
 
 Renders the Tailscale mark natively as a theme-colored 3×3 dot grid, matching the official SVG silhouette while avoiding tiny-SVG rendering quirks in the bar.
+
+## Install
+
+On [haseen](https://github.com/t1nk333r/haseen):
+
+```bash
+haseen plugin install https://github.com/t1nk333r/haseen-tailscale
+```
 
 ## Tests
 
